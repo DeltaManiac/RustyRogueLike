@@ -9,6 +9,36 @@ const SCREEN_HEIGHT: i32 = 50;
 const LIMIT_FPS: i32 = 20;
 const MAP_WIDTH: i32 = 80;
 const MAP_HEIGHT: i32 = 45;
+const COLOR_DARK_WALL: Color = Color {
+    r: 0,
+    g: 0,
+    b: 100,
+};
+const COLOR_DARK_GROUND: Color = Color {
+    r: 50,
+    g: 50,
+    b: 150,
+};
+type Map = Vec<Vec<Tile>>;
+#[derive(Clone,Copy,Debug)]
+struct Tile {
+    blocked: bool,
+    block_sight: bool,
+}
+impl Tile {
+    pub fn empty() -> Self {
+        Tile {
+            blocked: false,
+            block_sight: false,
+        }
+    }
+    pub fn wall() -> Self {
+        Tile {
+            blocked: true,
+            block_sight: true,
+        }
+    }
+}
 struct Object {
     x: i32,
     y: i32,
@@ -40,6 +70,36 @@ impl Object {
     pub fn clear(&self, con: &mut Console) {
         con.put_char(self.x, self.y, ' ', BackgroundFlag::None);
     }
+}
+
+fn make_map() -> Map {
+    let mut map = vec![vec![Tile::empty();MAP_HEIGHT as usize];MAP_WIDTH as usize];
+    map[30][22] = Tile::wall();
+    map[50][22] = Tile::wall();
+    map
+}
+
+fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &Map) {
+    for y in 0..MAP_HEIGHT {
+        for x in 0..MAP_WIDTH {
+            let wall = map[x as usize][y as usize].block_sight;
+            if wall {
+                con.set_char_background(x, y, COLOR_DARK_WALL, BackgroundFlag::Set)
+            } else {
+                con.set_char_background(x, y, COLOR_DARK_GROUND, BackgroundFlag::Set)
+            }
+        }
+    }
+    for object in objects {
+        object.draw(con);
+    }
+    blit(con,
+         (0, 0),
+         (SCREEN_WIDTH, SCREEN_HEIGHT),
+         root,
+         (0, 0),
+         1.0,
+         1.0);
 }
 
 fn handle_keys(con: &mut Root, player: &mut Object) -> bool {
@@ -74,19 +134,10 @@ fn main() {
     let enemy = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', colors::YELLOW);
     tcod::system::set_fps(LIMIT_FPS);
     let mut objects = [player, enemy];
-
+    let map = make_map();
 
     while !con.window_closed() {
-        for object in &objects {
-            object.draw(&mut con_back);
-        }
-        blit(&mut con_back,
-             (0, 0),
-             (SCREEN_WIDTH, SCREEN_HEIGHT),
-             &mut con,
-             (0, 0),
-             1.0,
-             1.0);
+        render_all(&mut con, &mut con_back, &objects, &map);
         con.flush();
         for object in &objects {
             object.clear(&mut con_back);
