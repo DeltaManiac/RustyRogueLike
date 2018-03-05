@@ -35,10 +35,14 @@ const COLOR_LIGHT_GROUND: Color = Color {
 const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
+const MAX_ROOM_MONSTERS: i32 = 3;
 
-const FOV_ALGO: FovAlgorithm = FovAlgorithm::Basic;
+//const FOV_ALGO: FovAlgorithm = FovAlgorithm::Basic;
+const FOV_ALGO: FovAlgorithm = FovAlgorithm::Shadow;
 const FOV_LIGHT_WALLS: bool = true;
 const TORCH_RADIUS: i32 = 10;
+
+const PLAYER: usize = 0;
 
 type Map = Vec<Vec<Tile>>;
 #[derive(Clone, Copy, Debug)]
@@ -99,21 +103,31 @@ struct Object {
     y: i32,
     c: char,
     color: Color,
+    name: String,
+    blocks: bool,
+    alive: bool,
 }
 
 impl Object {
-    pub fn new(x: i32, y: i32, c: char, color: Color) -> Self {
+    pub fn new(x: i32, y: i32, c: char, color: Color, name: &str, blocks: bool) -> Self {
         Object {
             x: x,
             y: y,
             c: c,
             color: color,
+            name: name.into(),
+            blocks: blocks,
+            alive: false,
         }
     }
 
-    pub fn move_by(&mut self, dx: i32, dy: i32) {
-        self.x += dx;
-        self.y += dy;
+    pub fn set_pos(&mut self, x: i32, y: i32) {
+        self.x = x;
+        self.y = y;
+    }
+
+    pub fn pos(&self) -> (i32, i32) {
+        (self.x, self.y)
     }
 
     pub fn draw(&self, con: &mut Console) {
@@ -124,6 +138,23 @@ impl Object {
     pub fn clear(&self, con: &mut Console) {
         con.put_char(self.x, self.y, ' ', BackgroundFlag::None);
     }
+}
+
+fn move_by(id: usize, dx: i32, dy: i32, map: &Map, objects: &mut [Object]) {
+    let (x, y) = objects[id].pos();
+    if !is_blocked(x + dx, y + dy, map, objects) {
+        objects[id].set_pos(x + dx, y + dy);
+    }
+}
+
+fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
+    if map[x as usize][y as usize].blocked {
+        return true;
+    }
+
+    objects
+        .iter()
+        .any(|object| object.blocks && object.x == x && object.y == y)
 }
 
 fn create_room(room: Rect, map: &mut Map) {
@@ -145,10 +176,9 @@ fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
         map[x as usize][y as usize] = Tile::empty();
     }
 }
-fn make_map() -> (Map, (i32, i32)) {
+fn make_map(objects: &mut Vec<Object>) -> (Map) {
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
     let mut rooms = vec![];
-    let mut starting_position = (0, 0);
     for _ in 0..MAX_ROOMS {
         let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
         let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
@@ -160,9 +190,10 @@ fn make_map() -> (Map, (i32, i32)) {
             .any(|other_room| new_room.intersects_with(other_room));
         if !failed {
             create_room(new_room, &mut map);
+            place_objects(new_room, &map, objects);
             let (new_x, new_y) = new_room.center();
             if rooms.is_empty() {
-                starting_position = (new_x, new_y);
+                objects[PLAYER].set_pos(new_x, new_y);
             } else {
                 let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
                 if rand::random() {
@@ -176,7 +207,26 @@ fn make_map() -> (Map, (i32, i32)) {
         }
         rooms.push(new_room);
     }
-    (map, starting_position)
+    (map)
+}
+
+fn place_objects(room: Rect, map: &Map, objects: &mut Vec<Object>) {
+    let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
+
+    for _ in 0..num_monsters {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        if !is_blocked(x, y, map, objects) {
+            let mut monster = if rand::random::<f32>() < 0.8 {
+                Object::new(x, y, 'o', colors::DESATURATED_GREEN, "orc", true)
+            } else {
+                Object::new(x, y, 'T', colors::DESATURATED_GREEN, "troll", true)
+            };
+            monster.alive = true;
+            objects.push(monster);
+        }
+    }
 }
 
 fn render_all(
@@ -224,28 +274,69 @@ fn render_all(
     );
 }
 
-fn handle_keys(con: &mut Root, player: &mut Object) -> bool {
+fn player_move_or_attack(dx: i32, dy: i32, map: &Map, objects: &mut [Object]) {
+    let x = objects[PLAYER].x + dx;
+    let y = objects[PLAYER].y + dy;
+    let target_id = objects.iter().position(|object| object.pos() == (x, y));
+
+    match target_id {
+        Some(target_id) => {
+            println!(
+                "The {} laughs at your puny efforts to attack him!",
+                objects[target_id].name
+            );
+        }
+        None => {
+            move_by(PLAYER, dx, dy, map, objects);
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlayerAction {
+    TookTurn,
+    DidntTakeTurn,
+    Exit,
+}
+fn handle_keys(con: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerAction {
     use tcod::input::Key;
     use tcod::input::KeyCode::*;
     let key = con.wait_for_keypress(true);
+    let player_alive = objects[PLAYER].alive;
 
-    match key {
-        Key {
-            code: Enter,
-            alt: true,
-            ..
-        } => {
+    match (key, player_alive) {
+        (
+            Key {
+                code: Enter,
+                alt: true,
+                ..
+            },
+            _,
+        ) => {
             let fullscreen = con.is_fullscreen();
             con.set_fullscreen(!fullscreen);
+            PlayerAction::DidntTakeTurn
         }
-        Key { code: Escape, .. } => return true,
-        Key { code: Up, .. } => player.move_by(0, -1),
-        Key { code: Down, .. } => player.move_by(0, 1),
-        Key { code: Left, .. } => player.move_by(-1, 0),
-        Key { code: Right, .. } => player.move_by(1, 0),
-        _ => {}
+        (Key { code: Escape, .. }, _) => return PlayerAction::Exit,
+
+        (Key { code: Up, .. }, true) => {
+            player_move_or_attack(0, -1, map, objects);
+            PlayerAction::TookTurn
+        }
+        (Key { code: Down, .. }, true) => {
+            player_move_or_attack(0, 1, map, objects);
+            PlayerAction::TookTurn
+        }
+        (Key { code: Left, .. }, true) => {
+            player_move_or_attack(-1, 0, map, objects);
+            PlayerAction::TookTurn
+        }
+        (Key { code: Right, .. }, true) => {
+            player_move_or_attack(1, 0, map, objects);
+            PlayerAction::TookTurn
+        }
+        _ => PlayerAction::DidntTakeTurn,
     }
-    false
 }
 
 fn main() {
@@ -253,15 +344,14 @@ fn main() {
         .size(SCREEN_WIDTH, SCREEN_HEIGHT)
         .title("LTCOD")
         .init();
-
+    tcod::system::set_fps(LIMIT_FPS);
     let mut con_back = Offscreen::new(SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    let (mut map, (player_x, player_y)) = make_map();
-    let player = Object::new(player_x, player_y, '@', colors::WHITE);
-    let enemy = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', colors::YELLOW);
-    tcod::system::set_fps(LIMIT_FPS);
-    let mut objects = [player, enemy];
+    let mut player = Object::new(0, 0, '@', colors::WHITE, "Player", true);
+    player.alive = true;
+    let mut objects = vec![player];
 
+    let mut map = make_map(&mut objects);
     let mut fov_map = FovMap::new(MAP_WIDTH, MAP_HEIGHT);
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
@@ -288,11 +378,18 @@ fn main() {
         for object in &objects {
             object.clear(&mut con_back);
         }
-        let exit = handle_keys(&mut con, &mut objects[0]);
-        let player = &mut objects[0];
-        previous_player_position = (player.x, player.y);
-        if exit {
+        previous_player_position = objects[PLAYER].pos();
+        let player_action = handle_keys(&mut con, &map, &mut objects);
+        if player_action == PlayerAction::Exit {
             break;
+        }
+
+        if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
+            for object in &objects {
+                if (object as *const _) != (&objects[PLAYER] as *const _) {
+                    println!("The {} growls!", object.name);
+                }
+            }
         }
     }
 }
